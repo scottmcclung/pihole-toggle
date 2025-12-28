@@ -448,6 +448,23 @@ function getStatusPage() {
       background: rgba(255, 255, 255, 0.3);
     }
 
+    .indicator-loading.pulse {
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.3; transform: scale(1); }
+      50% { opacity: 0.8; transform: scale(1.1); }
+    }
+
+    .skeleton {
+      color: rgba(255, 255, 255, 0.3);
+    }
+
+    .instance-card.loading {
+      opacity: 0.7;
+    }
+
     .controls {
       border-top: 1px solid rgba(255, 255, 255, 0.1);
       padding-top: 24px;
@@ -542,15 +559,7 @@ function getStatusPage() {
     <h1>Pi-hole Toggle</h1>
     <p class="subtitle">Ad blocking control</p>
 
-    <div id="instances" class="instances">
-      <div class="instance-card">
-        <div class="instance-info">
-          <div class="instance-name">Loading...</div>
-          <div class="instance-status status-loading">Connecting...</div>
-        </div>
-        <div class="status-indicator indicator-loading"></div>
-      </div>
-    </div>
+    <div id="instances" class="instances"></div>
 
     <div class="controls">
       <button id="enableBtn" class="toggle-btn enable" style="display: none;">Enable All</button>
@@ -580,8 +589,32 @@ function getStatusPage() {
     const errorEl = document.getElementById('error');
     const lastUpdatedEl = document.getElementById('lastUpdated');
 
+    // Injected from server - instance names for loading placeholders
+    const instanceNames = ${JSON.stringify(INSTANCES.map(i => i.name))};
+
     let instancesData = [];
     let timerIntervals = new Map();
+    let initialLoad = true;
+
+    // Render loading placeholders immediately
+    function renderLoadingState() {
+      instancesEl.innerHTML = instanceNames.map(name =>
+        '<div class="instance-card loading">' +
+          '<div class="instance-info">' +
+            '<div class="instance-header">' +
+              '<div class="instance-name">' + escapeHtml(name) + '</div>' +
+              '<div class="instance-status status-loading">Connecting...</div>' +
+            '</div>' +
+            '<div class="instance-metrics">' +
+              '<div class="metric"><span class="metric-icon">📊</span><span class="metric-value skeleton">---</span></div>' +
+              '<div class="metric"><span class="metric-icon">🛡</span><span class="metric-value skeleton">---</span></div>' +
+              '<div class="metric"><span class="metric-icon">%</span><span class="metric-value skeleton">--</span></div>' +
+            '</div>' +
+          '</div>' +
+          '<div class="status-indicator indicator-loading pulse"></div>' +
+        '</div>'
+      ).join('');
+    }
 
     function formatTime(seconds) {
       const hrs = Math.floor(seconds / 3600);
@@ -660,17 +693,20 @@ function getStatusPage() {
     }
 
     function updateControls() {
-      // Determine overall state - any blocking = show disable options
-      // All disabled = show enable button prominently
-      const anyBlocking = instancesData.some(i => i.blocking === true);
+      const anyDisabled = instancesData.some(i => i.blocking === false);
       const allDisabled = instancesData.every(i => i.blocking === false);
-      const maxTimer = Math.max(...instancesData.map(i => i.timer || 0));
 
-      if (allDisabled) {
+      // Show enable button if any instance is disabled
+      if (anyDisabled) {
         enableBtn.style.display = 'block';
-        durationLabel.textContent = 'Add time to all:';
       } else {
         enableBtn.style.display = 'none';
+      }
+
+      // Change label based on state
+      if (allDisabled) {
+        durationLabel.textContent = 'Add time to all:';
+      } else {
         durationLabel.textContent = 'Disable all for:';
       }
     }
@@ -784,6 +820,9 @@ function getStatusPage() {
         disableBlocking(minutes, allDisabled);
       });
     });
+
+    // Show loading placeholders immediately
+    renderLoadingState();
 
     // Initial fetch
     fetchStatus();
