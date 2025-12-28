@@ -176,6 +176,7 @@ async function getInstanceStatus(instance, retry = true) {
       error: null,
     };
   } catch (err) {
+    console.error(`[${instance.name}] Connection error:`, err.message);
     return {
       name: instance.name,
       url: instance.url,
@@ -693,11 +694,11 @@ function getStatusPage() {
     }
 
     function updateControls() {
-      const anyDisabled = instancesData.some(i => i.blocking === false);
+      // Show enable button if any instance is NOT confirmed enabled (disabled OR error)
+      const anyNotEnabled = instancesData.some(i => i.blocking !== true);
       const allDisabled = instancesData.every(i => i.blocking === false);
 
-      // Show enable button if any instance is disabled
-      if (anyDisabled) {
+      if (anyNotEnabled) {
         enableBtn.style.display = 'block';
       } else {
         enableBtn.style.display = 'none';
@@ -745,11 +746,19 @@ function getStatusPage() {
         const res = await fetch('/api/status');
         const data = await res.json();
         if (data.success) {
+          // Log any instance-level errors to console for debugging
+          data.instances.forEach(inst => {
+            if (inst.error) {
+              console.error('[' + inst.name + '] Error:', inst.error);
+            }
+          });
           updateUI(data.instances);
         } else {
+          console.error('API error:', data.error);
           showError(data.error || 'Failed to fetch status');
         }
       } catch (err) {
+        console.error('Connection error:', err);
         showError('Connection error: ' + err.message);
       }
     }
@@ -763,12 +772,20 @@ function getStatusPage() {
         const res = await fetch('/api/enable', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
+          // Log any instance-level errors
+          data.instances.forEach(inst => {
+            if (inst.error) {
+              console.error('[' + inst.name + '] Enable error:', inst.error);
+            }
+          });
           updateUI(data.instances);
         } else {
+          console.error('Enable API error:', data.error);
           showError(data.error || 'Failed to enable');
           fetchStatus();
         }
       } catch (err) {
+        console.error('Enable connection error:', err);
         showError('Connection error: ' + err.message);
         fetchStatus();
       }
@@ -795,12 +812,20 @@ function getStatusPage() {
         const res = await fetch('/api/disable/' + totalMinutes, { method: 'POST' });
         const data = await res.json();
         if (data.success) {
+          // Log any instance-level errors
+          data.instances.forEach(inst => {
+            if (inst.error) {
+              console.error('[' + inst.name + '] Disable error:', inst.error);
+            }
+          });
           updateUI(data.instances);
         } else {
+          console.error('Disable API error:', data.error);
           showError(data.error || 'Failed to disable');
           fetchStatus();
         }
       } catch (err) {
+        console.error('Disable connection error:', err);
         showError('Connection error: ' + err.message);
         fetchStatus();
       }
