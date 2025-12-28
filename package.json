@@ -1,0 +1,14 @@
+{
+  "name": "pihole-toggle",
+  "version": "1.0.0",
+  "description": "Simple HTTP endpoints to toggle Pi-hole v6 blocking",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": ["pihole", "dns", "blocking"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
