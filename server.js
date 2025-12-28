@@ -124,7 +124,7 @@ function htmlResponse(res, html) {
     'Content-Type': 'text/html',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
-    'Content-Security-Policy': "default-src 'self'; script-src 'unsafe-inline' https://unpkg.com; style-src 'unsafe-inline'"
+    'Content-Security-Policy': "default-src 'self'; script-src 'unsafe-inline' 'unsafe-eval' https://unpkg.com; style-src 'unsafe-inline'"
   });
   res.end(html);
 }
