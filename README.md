@@ -21,8 +21,9 @@ Pi-hole v6 replaced the simple API token auth with session-based authentication,
 |----------|-------------|
 | `GET /` | Web UI with status and controls |
 | `GET /enable` | Enable blocking on all instances |
-| `GET /disable/:minutes` | Disable blocking for X minutes |
+| `GET /disable/:minutes` | Disable blocking for X minutes (max 43200) |
 | `GET /api/status` | JSON status for all instances |
+| `GET /health` | Health check endpoint |
 
 ## Setup
 

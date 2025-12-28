@@ -1,7 +1,12 @@
 const http = require('http');
 const https = require('https');
 
+// Configuration
 const PORT = process.env.PORT || 3000;
+const REQUEST_TIMEOUT_MS = 10000;
+const MAX_REDIRECTS = 5;
+const SESSION_BUFFER_MS = 30000;
+const MAX_DISABLE_MINUTES = 43200; // 30 days
 
 // Parse Pi-hole instances from environment
 function getInstances() {
@@ -35,11 +40,21 @@ const INSTANCES = getInstances();
 const sessionCache = new Map();
 
 /**
+ * Escape HTML to prevent XSS
+ */
+function escapeHtml(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
+/**
  * Make an HTTP request and return parsed JSON response
  */
 function request(url, options, body = null, redirectCount = 0) {
   return new Promise((resolve, reject) => {
-    if (redirectCount > 5) {
+    if (redirectCount > MAX_REDIRECTS) {
       return reject(new Error('Too many redirects'));
     }
 
@@ -53,6 +68,8 @@ function request(url, options, body = null, redirectCount = 0) {
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
       headers: options.headers || {},
+      // Allow self-signed certificates (common in home labs)
+      rejectUnauthorized: false,
     };
 
     const req = transport.request(reqOptions, (res) => {
@@ -72,6 +89,11 @@ function request(url, options, body = null, redirectCount = 0) {
       });
     });
 
+    // Add timeout to prevent hung connections
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+      req.destroy(new Error('Request timeout'));
+    });
+
     req.on('error', reject);
     if (body) req.write(body);
     req.end();
@@ -85,8 +107,8 @@ async function authenticate(instance) {
   const cacheKey = instance.url;
   const cached = sessionCache.get(cacheKey);
 
-  // Return cached session if still valid (with 30s buffer)
-  if (cached && Date.now() < cached.expiresAt - 30000) {
+  // Return cached session if still valid (with buffer)
+  if (cached && Date.now() < cached.expiresAt - SESSION_BUFFER_MS) {
     return cached.session;
   }
 
@@ -583,6 +605,13 @@ function getStatusPage() {
       return num.toString();
     }
 
+    function escapeHtml(str) {
+      if (typeof str !== 'string') return str;
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
     function renderInstances() {
       instancesEl.innerHTML = instancesData.map((inst, i) => {
         let statusClass, indicatorClass, statusText, timerHtml = '';
@@ -619,7 +648,7 @@ function getStatusPage() {
         return '<div class="instance-card">' +
           '<div class="instance-info">' +
             '<div class="instance-header">' +
-              '<div class="instance-name">' + inst.name + '</div>' +
+              '<div class="instance-name">' + escapeHtml(inst.name) + '</div>' +
               '<div class="instance-status ' + statusClass + '">' + statusText + '</div>' +
             '</div>' +
             metricsHtml +
@@ -778,7 +807,12 @@ async function handleRequest(req, res) {
 
   // GET / - Status page
   if (req.method === 'GET' && path === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(200, {
+      'Content-Type': 'text/html',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy': "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'"
+    });
     res.end(getStatusPage());
     return;
   }
@@ -798,6 +832,10 @@ async function handleRequest(req, res) {
   const disableMatch = path.match(/^\/disable\/(\d+)$/);
   if (req.method === 'GET' && disableMatch) {
     const minutes = parseInt(disableMatch[1], 10);
+    if (minutes < 1 || minutes > MAX_DISABLE_MINUTES) {
+      redirect(res, '/?error=invalid_duration');
+      return;
+    }
     const seconds = minutes * 60;
     try {
       await setAllBlocking(false, seconds);
@@ -836,6 +874,10 @@ async function handleRequest(req, res) {
   const apiDisableMatch = path.match(/^\/api\/disable\/(\d+)$/);
   if (req.method === 'POST' && apiDisableMatch) {
     const minutes = parseInt(apiDisableMatch[1], 10);
+    if (minutes < 1 || minutes > MAX_DISABLE_MINUTES) {
+      jsonResponse(res, 400, { success: false, error: `Duration must be between 1 and ${MAX_DISABLE_MINUTES} minutes` });
+      return;
+    }
     const seconds = minutes * 60;
     try {
       const instances = await setAllBlocking(false, seconds);
@@ -843,6 +885,12 @@ async function handleRequest(req, res) {
     } catch (err) {
       jsonResponse(res, 500, { success: false, error: err.message });
     }
+    return;
+  }
+
+  // GET /health - Health check endpoint
+  if (req.method === 'GET' && path === '/health') {
+    jsonResponse(res, 200, { status: 'ok', instances: INSTANCES.length });
     return;
   }
 
@@ -857,3 +905,17 @@ server.listen(PORT, () => {
   console.log(`Managing ${INSTANCES.length} Pi-hole instance(s):`);
   INSTANCES.forEach(inst => console.log(`  - ${inst.name}: ${inst.url}`));
 });
+
+// Graceful shutdown
+function shutdown(signal) {
+  console.log(`Received ${signal}, shutting down...`);
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+  // Force exit after 5 seconds
+  setTimeout(() => process.exit(1), 5000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
