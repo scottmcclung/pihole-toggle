@@ -60,11 +60,10 @@ A lightweight Node.js service that provides simple HTTP endpoints and a web UI t
 ### NFR-1: Zero Dependencies
 - **NFR-1.1**: Use only Node.js built-in modules (http, https)
 - **NFR-1.2**: No npm dependencies required
-- **NFR-1.3**: Single JavaScript file for the server
 
 ### NFR-2: Self-Contained UI
-- **NFR-2.1**: All HTML, CSS, and JavaScript in a single response
-- **NFR-2.2**: No external CDN dependencies
+- **NFR-2.1**: All HTML, CSS, and JavaScript in a single html file
+- **NFR-2.2**: No npm dependencies that require a build step, only CDN dependencies are allowed
 - **NFR-2.3**: Inline styles and scripts
 
 ### NFR-3: Docker Deployment
