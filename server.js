@@ -117,27 +117,40 @@ async function authenticate(instance) {
 }
 
 /**
- * Get current blocking status from a Pi-hole instance
+ * Get current blocking status and stats from a Pi-hole instance
  */
 async function getInstanceStatus(instance, retry = true) {
   try {
     const { sid } = await authenticate(instance);
-    const res = await request(`${instance.url}/api/dns/blocking`, {
-      method: 'GET',
-      headers: { 'X-FTL-SID': sid },
-    });
+
+    // Fetch blocking status and stats in parallel
+    const [blockingRes, statsRes] = await Promise.all([
+      request(`${instance.url}/api/dns/blocking`, {
+        method: 'GET',
+        headers: { 'X-FTL-SID': sid },
+      }),
+      request(`${instance.url}/api/stats/summary`, {
+        method: 'GET',
+        headers: { 'X-FTL-SID': sid },
+      }),
+    ]);
 
     // If session expired, clear cache and retry once
-    if (res.status === 401 && retry) {
+    if ((blockingRes.status === 401 || statsRes.status === 401) && retry) {
       sessionCache.delete(instance.url);
       return getInstanceStatus(instance, false);
     }
 
+    const stats = statsRes.data?.queries || {};
+
     return {
       name: instance.name,
       url: instance.url,
-      blocking: res.data.blocking === 'enabled',
-      timer: res.data.timer || 0,
+      blocking: blockingRes.data.blocking === 'enabled',
+      timer: blockingRes.data.timer || 0,
+      totalQueries: stats.total || 0,
+      blockedQueries: stats.blocked || 0,
+      percentBlocked: stats.percent_blocked || 0,
       error: null,
     };
   } catch (err) {
@@ -146,6 +159,9 @@ async function getInstanceStatus(instance, retry = true) {
       url: instance.url,
       blocking: null,
       timer: 0,
+      totalQueries: 0,
+      blockedQueries: 0,
+      percentBlocked: 0,
       error: err.message,
     };
   }
@@ -306,28 +322,65 @@ function getStatusPage() {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 12px;
     }
 
     .instance-info {
       text-align: left;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .instance-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
     }
 
     .instance-name {
       color: #fff;
       font-size: 14px;
       font-weight: 600;
-      margin-bottom: 4px;
     }
 
     .instance-status {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.2);
     }
 
     .instance-timer {
       color: rgba(255, 255, 255, 0.6);
       font-size: 11px;
-      margin-top: 2px;
+      margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .instance-metrics {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .metric {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    .metric-icon {
+      font-size: 12px;
+      opacity: 0.8;
+    }
+
+    .metric-value {
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.9);
       font-variant-numeric: tabular-nums;
     }
 
@@ -524,6 +577,12 @@ function getStatusPage() {
       setTimeout(() => { errorEl.style.display = 'none'; }, 5000);
     }
 
+    function formatNumber(num) {
+      if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+      if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+      return num.toString();
+    }
+
     function renderInstances() {
       instancesEl.innerHTML = instancesData.map((inst, i) => {
         let statusClass, indicatorClass, statusText, timerHtml = '';
@@ -546,14 +605,24 @@ function getStatusPage() {
           statusText = 'Disabled';
           if (inst.timerEnd && inst.timerEnd > Date.now()) {
             const remaining = Math.floor((inst.timerEnd - Date.now()) / 1000);
-            timerHtml = '<div class="instance-timer">Re-enables in ' + formatTime(remaining) + '</div>';
+            timerHtml = '<div class="instance-timer">⏱ Re-enables in ' + formatTime(remaining) + '</div>';
           }
         }
 
+        const metricsHtml = !inst.error ?
+          '<div class="instance-metrics">' +
+            '<div class="metric"><span class="metric-icon">📊</span><span class="metric-value">' + formatNumber(inst.totalQueries || 0) + '</span></div>' +
+            '<div class="metric"><span class="metric-icon">🛡</span><span class="metric-value">' + formatNumber(inst.blockedQueries || 0) + '</span></div>' +
+            '<div class="metric"><span class="metric-icon">%</span><span class="metric-value">' + (inst.percentBlocked || 0).toFixed(1) + '</span></div>' +
+          '</div>' : '';
+
         return '<div class="instance-card">' +
           '<div class="instance-info">' +
-            '<div class="instance-name">' + inst.name + '</div>' +
-            '<div class="instance-status ' + statusClass + '">' + statusText + '</div>' +
+            '<div class="instance-header">' +
+              '<div class="instance-name">' + inst.name + '</div>' +
+              '<div class="instance-status ' + statusClass + '">' + statusText + '</div>' +
+            '</div>' +
+            metricsHtml +
             timerHtml +
           '</div>' +
           '<div class="status-indicator ' + indicatorClass + '"></div>' +
@@ -596,6 +665,9 @@ function getStatusPage() {
       instancesData = data.map(inst => ({
         ...inst,
         timerEnd: inst.timer > 0 ? Date.now() + (inst.timer * 1000) : null,
+        totalQueries: inst.totalQueries || 0,
+        blockedQueries: inst.blockedQueries || 0,
+        percentBlocked: inst.percentBlocked || 0,
       }));
 
       renderInstances();
