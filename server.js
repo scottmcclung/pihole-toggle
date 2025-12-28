@@ -1,13 +1,38 @@
 const http = require('http');
 const https = require('https');
 
-const PIHOLE_URL = process.env.PIHOLE_URL || 'http://localhost';
-const PIHOLE_PASSWORD = process.env.PIHOLE_PASSWORD || '';
 const PORT = process.env.PORT || 3000;
 
-// Session cache
-let cachedSession = null;
-let sessionExpiresAt = 0;
+// Parse Pi-hole instances from environment
+function getInstances() {
+  // Try new multi-instance format first
+  if (process.env.PIHOLE_INSTANCES) {
+    try {
+      return JSON.parse(process.env.PIHOLE_INSTANCES);
+    } catch (e) {
+      console.error('Failed to parse PIHOLE_INSTANCES:', e.message);
+      process.exit(1);
+    }
+  }
+
+  // Fall back to single instance format for backwards compatibility
+  if (process.env.PIHOLE_URL) {
+    return [{
+      name: process.env.PIHOLE_NAME || 'Pi-hole',
+      url: process.env.PIHOLE_URL,
+      password: process.env.PIHOLE_PASSWORD || '',
+    }];
+  }
+
+  console.error('No Pi-hole instances configured. Set PIHOLE_INSTANCES in .env');
+  console.error('Example: PIHOLE_INSTANCES=\'[{"name":"Pi-hole","url":"https://pihole.local","password":"your-password"}]\'');
+  process.exit(1);
+}
+
+const INSTANCES = getInstances();
+
+// Session cache per instance (keyed by URL)
+const sessionCache = new Map();
 
 /**
  * Make an HTTP request and return parsed JSON response
@@ -54,66 +79,93 @@ function request(url, options, body = null, redirectCount = 0) {
 }
 
 /**
- * Authenticate with Pi-hole and get session credentials
- * Caches session to avoid exceeding API seat limits
+ * Authenticate with a Pi-hole instance and get session credentials
  */
-async function authenticate() {
+async function authenticate(instance) {
+  const cacheKey = instance.url;
+  const cached = sessionCache.get(cacheKey);
+
   // Return cached session if still valid (with 30s buffer)
-  if (cachedSession && Date.now() < sessionExpiresAt - 30000) {
-    return cachedSession;
+  if (cached && Date.now() < cached.expiresAt - 30000) {
+    return cached.session;
   }
 
-  const url = `${PIHOLE_URL}/api/auth`;
+  const url = `${instance.url}/api/auth`;
   const res = await request(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-  }, JSON.stringify({ password: PIHOLE_PASSWORD }));
+  }, JSON.stringify({ password: instance.password }));
 
   if (res.status !== 200 || !res.data?.session?.valid) {
-    console.error('Auth failed:', { status: res.status, response: res.data });
-    cachedSession = null;
-    sessionExpiresAt = 0;
-    throw new Error(`Authentication failed: ${JSON.stringify(res.data)}`);
+    console.error(`Auth failed for ${instance.name}:`, { status: res.status, response: res.data });
+    sessionCache.delete(cacheKey);
+    throw new Error(`Authentication failed for ${instance.name}`);
   }
 
-  // Cache the session (validity is in seconds)
+  // Cache the session
   const validityMs = (res.data.session.validity || 300) * 1000;
-  cachedSession = {
+  const session = {
     sid: res.data.session.sid,
     csrf: res.data.session.csrf,
   };
-  sessionExpiresAt = Date.now() + validityMs;
-
-  return cachedSession;
-}
-
-/**
- * Get current blocking status from Pi-hole
- */
-async function getStatus(retry = true) {
-  const { sid } = await authenticate();
-  const res = await request(`${PIHOLE_URL}/api/dns/blocking`, {
-    method: 'GET',
-    headers: { 'X-FTL-SID': sid },
+  sessionCache.set(cacheKey, {
+    session,
+    expiresAt: Date.now() + validityMs,
   });
 
-  // If session expired, clear cache and retry once
-  if (res.status === 401 && retry) {
-    cachedSession = null;
-    sessionExpiresAt = 0;
-    return getStatus(false);
-  }
-
-  return res.data;
+  return session;
 }
 
 /**
- * Set blocking state on Pi-hole
+ * Get current blocking status from a Pi-hole instance
  */
-async function setBlocking(enabled, timerSeconds = null, retry = true) {
-  const { sid, csrf } = await authenticate();
+async function getInstanceStatus(instance, retry = true) {
+  try {
+    const { sid } = await authenticate(instance);
+    const res = await request(`${instance.url}/api/dns/blocking`, {
+      method: 'GET',
+      headers: { 'X-FTL-SID': sid },
+    });
 
-  const url = `${PIHOLE_URL}/api/dns/blocking`;
+    // If session expired, clear cache and retry once
+    if (res.status === 401 && retry) {
+      sessionCache.delete(instance.url);
+      return getInstanceStatus(instance, false);
+    }
+
+    return {
+      name: instance.name,
+      url: instance.url,
+      blocking: res.data.blocking === 'enabled',
+      timer: res.data.timer || 0,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      name: instance.name,
+      url: instance.url,
+      blocking: null,
+      timer: 0,
+      error: err.message,
+    };
+  }
+}
+
+/**
+ * Get status from all Pi-hole instances
+ */
+async function getAllStatus() {
+  const results = await Promise.all(INSTANCES.map(inst => getInstanceStatus(inst)));
+  return results;
+}
+
+/**
+ * Set blocking state on a single Pi-hole instance
+ */
+async function setInstanceBlocking(instance, enabled, timerSeconds = null, retry = true) {
+  const { sid, csrf } = await authenticate(instance);
+
+  const url = `${instance.url}/api/dns/blocking`;
   const body = { blocking: enabled };
   if (!enabled && timerSeconds) {
     body.timer = timerSeconds;
@@ -130,16 +182,41 @@ async function setBlocking(enabled, timerSeconds = null, retry = true) {
 
   // If session expired, clear cache and retry once
   if (res.status === 401 && retry) {
-    cachedSession = null;
-    sessionExpiresAt = 0;
-    return setBlocking(enabled, timerSeconds, false);
+    sessionCache.delete(instance.url);
+    return setInstanceBlocking(instance, enabled, timerSeconds, false);
   }
 
   if (res.status !== 200) {
-    throw new Error(`Failed to set blocking: ${JSON.stringify(res.data)}`);
+    throw new Error(`Failed to set blocking on ${instance.name}: ${JSON.stringify(res.data)}`);
   }
 
-  return res.data;
+  return {
+    name: instance.name,
+    blocking: res.data.blocking === 'enabled',
+    timer: res.data.timer || 0,
+  };
+}
+
+/**
+ * Set blocking state on all Pi-hole instances
+ */
+async function setAllBlocking(enabled, timerSeconds = null) {
+  const results = await Promise.allSettled(
+    INSTANCES.map(inst => setInstanceBlocking(inst, enabled, timerSeconds))
+  );
+
+  return results.map((result, i) => {
+    if (result.status === 'fulfilled') {
+      return { ...result.value, error: null };
+    } else {
+      return {
+        name: INSTANCES[i].name,
+        blocking: null,
+        timer: 0,
+        error: result.reason.message,
+      };
+    }
+  });
 }
 
 /**
@@ -191,7 +268,7 @@ function getStatusPage() {
       border-radius: 24px;
       padding: 40px;
       text-align: center;
-      max-width: 400px;
+      max-width: 500px;
       width: 100%;
       box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3);
       border: 1px solid rgba(255, 255, 255, 0.1);
@@ -212,28 +289,46 @@ function getStatusPage() {
     .subtitle {
       color: rgba(255, 255, 255, 0.6);
       font-size: 14px;
-      margin-bottom: 32px;
-    }
-
-    .status-card {
-      background: rgba(0, 0, 0, 0.2);
-      border-radius: 16px;
-      padding: 24px;
       margin-bottom: 24px;
     }
 
-    .status-label {
-      color: rgba(255, 255, 255, 0.6);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 8px;
+    .instances {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-bottom: 24px;
     }
 
-    .status-value {
-      font-size: 28px;
-      font-weight: 700;
+    .instance-card {
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .instance-info {
+      text-align: left;
+    }
+
+    .instance-name {
+      color: #fff;
+      font-size: 14px;
+      font-weight: 600;
       margin-bottom: 4px;
+    }
+
+    .instance-status {
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .instance-timer {
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 11px;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
     }
 
     .status-enabled {
@@ -244,20 +339,43 @@ function getStatusPage() {
       color: #f87171;
     }
 
-    .status-loading {
+    .status-error {
       color: #fbbf24;
     }
 
-    .timer {
-      color: rgba(255, 255, 255, 0.8);
-      font-size: 16px;
-      font-variant-numeric: tabular-nums;
-      margin-top: 8px;
+    .status-loading {
+      color: rgba(255, 255, 255, 0.5);
     }
 
-    .timer-label {
-      color: rgba(255, 255, 255, 0.5);
-      font-size: 12px;
+    .status-indicator {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .indicator-enabled {
+      background: #4ade80;
+      box-shadow: 0 0 8px rgba(74, 222, 128, 0.5);
+    }
+
+    .indicator-disabled {
+      background: #f87171;
+      box-shadow: 0 0 8px rgba(248, 113, 113, 0.5);
+    }
+
+    .indicator-error {
+      background: #fbbf24;
+      box-shadow: 0 0 8px rgba(251, 191, 36, 0.5);
+    }
+
+    .indicator-loading {
+      background: rgba(255, 255, 255, 0.3);
+    }
+
+    .controls {
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      padding-top: 24px;
     }
 
     .toggle-btn {
@@ -271,6 +389,7 @@ function getStatusPage() {
       transition: all 0.2s ease;
       text-transform: uppercase;
       letter-spacing: 1px;
+      margin-bottom: 16px;
     }
 
     .toggle-btn:disabled {
@@ -288,35 +407,19 @@ function getStatusPage() {
       box-shadow: 0 10px 30px rgba(74, 222, 128, 0.3);
     }
 
-    .toggle-btn.disable {
-      background: linear-gradient(135deg, #f87171 0%, #ef4444 100%);
-      color: #fff;
-    }
-
-    .toggle-btn.disable:hover:not(:disabled) {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 30px rgba(248, 113, 113, 0.3);
-    }
-
     .duration-label {
       color: rgba(255, 255, 255, 0.6);
       font-size: 12px;
       text-transform: uppercase;
       letter-spacing: 1px;
-      margin-top: 20px;
       margin-bottom: 12px;
     }
 
     .duration-picker {
       display: flex;
-      margin-top: 0;
       gap: 8px;
       flex-wrap: wrap;
       justify-content: center;
-    }
-
-    .duration-picker.show {
-      display: flex;
     }
 
     .duration-btn {
@@ -331,9 +434,14 @@ function getStatusPage() {
       transition: all 0.2s ease;
     }
 
-    .duration-btn:hover {
+    .duration-btn:hover:not(:disabled) {
       background: rgba(255, 255, 255, 0.1);
       border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    .duration-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
     }
 
     .error {
@@ -359,23 +467,29 @@ function getStatusPage() {
     <h1>Pi-hole Toggle</h1>
     <p class="subtitle">Ad blocking control</p>
 
-    <div class="status-card">
-      <div class="status-label">Blocking Status</div>
-      <div id="status" class="status-value status-loading">Loading...</div>
-      <div id="timer" class="timer"></div>
+    <div id="instances" class="instances">
+      <div class="instance-card">
+        <div class="instance-info">
+          <div class="instance-name">Loading...</div>
+          <div class="instance-status status-loading">Connecting...</div>
+        </div>
+        <div class="status-indicator indicator-loading"></div>
+      </div>
     </div>
 
-    <button id="enableBtn" class="toggle-btn enable" style="display: none;">Enable Blocking</button>
+    <div class="controls">
+      <button id="enableBtn" class="toggle-btn enable" style="display: none;">Enable All</button>
 
-    <div class="duration-label" id="durationLabel">Disable for:</div>
-    <div id="durationPicker" class="duration-picker show">
-      <button class="duration-btn" data-minutes="30">30 min</button>
-      <button class="duration-btn" data-minutes="60">1 hr</button>
-      <button class="duration-btn" data-minutes="120">2 hrs</button>
-      <button class="duration-btn" data-minutes="240">4 hrs</button>
-      <button class="duration-btn" data-minutes="480">8 hrs</button>
-      <button class="duration-btn" data-minutes="720">12 hrs</button>
-      <button class="duration-btn" data-minutes="1440">24 hrs</button>
+      <div class="duration-label" id="durationLabel">Disable all for:</div>
+      <div id="durationPicker" class="duration-picker">
+        <button class="duration-btn" data-minutes="30">30 min</button>
+        <button class="duration-btn" data-minutes="60">1 hr</button>
+        <button class="duration-btn" data-minutes="120">2 hrs</button>
+        <button class="duration-btn" data-minutes="240">4 hrs</button>
+        <button class="duration-btn" data-minutes="480">8 hrs</button>
+        <button class="duration-btn" data-minutes="720">12 hrs</button>
+        <button class="duration-btn" data-minutes="1440">24 hrs</button>
+      </div>
     </div>
 
     <div id="error" class="error" style="display: none;"></div>
@@ -384,44 +498,24 @@ function getStatusPage() {
   </div>
 
   <script>
-    const statusEl = document.getElementById('status');
-    const timerEl = document.getElementById('timer');
+    const instancesEl = document.getElementById('instances');
     const enableBtn = document.getElementById('enableBtn');
     const durationLabel = document.getElementById('durationLabel');
     const durationPicker = document.getElementById('durationPicker');
     const errorEl = document.getElementById('error');
     const lastUpdatedEl = document.getElementById('lastUpdated');
 
-    let currentState = null;
-    let currentTimer = 0;
-    let timerEndTime = null;
-    let timerInterval = null;
+    let instancesData = [];
+    let timerIntervals = new Map();
 
     function formatTime(seconds) {
       const hrs = Math.floor(seconds / 3600);
       const mins = Math.floor((seconds % 3600) / 60);
-      const secs = seconds % 60;
+      const secs = Math.floor(seconds % 60);
       if (hrs > 0) {
         return hrs + ':' + mins.toString().padStart(2, '0') + ':' + secs.toString().padStart(2, '0');
       }
       return mins + ':' + secs.toString().padStart(2, '0');
-    }
-
-    function updateTimerDisplay() {
-      if (!timerEndTime) {
-        timerEl.innerHTML = '';
-        return;
-      }
-
-      const remaining = Math.max(0, Math.floor((timerEndTime - Date.now()) / 1000));
-      if (remaining <= 0) {
-        timerEl.innerHTML = '';
-        timerEndTime = null;
-        fetchStatus();
-        return;
-      }
-
-      timerEl.innerHTML = '<span class="timer-label">Re-enables in</span><br>' + formatTime(remaining);
     }
 
     function showError(msg) {
@@ -430,33 +524,83 @@ function getStatusPage() {
       setTimeout(() => { errorEl.style.display = 'none'; }, 5000);
     }
 
-    function updateUI(data) {
-      currentState = data.blocking;
-      currentTimer = data.timer || 0;
+    function renderInstances() {
+      instancesEl.innerHTML = instancesData.map((inst, i) => {
+        let statusClass, indicatorClass, statusText, timerHtml = '';
 
-      statusEl.textContent = data.blocking ? 'Enabled' : 'Disabled';
-      statusEl.className = 'status-value ' + (data.blocking ? 'status-enabled' : 'status-disabled');
-
-      if (data.blocking) {
-        // Blocking is ON - show duration buttons to disable
-        enableBtn.style.display = 'none';
-        durationLabel.textContent = 'Disable for:';
-        timerEndTime = null;
-      } else {
-        // Blocking is OFF - show enable button and option to add time
-        enableBtn.style.display = 'block';
-        durationLabel.textContent = 'Add time:';
-
-        if (data.timer && data.timer > 0) {
-          timerEndTime = Date.now() + (data.timer * 1000);
+        if (inst.error) {
+          statusClass = 'status-error';
+          indicatorClass = 'indicator-error';
+          statusText = 'Error';
+        } else if (inst.blocking === null) {
+          statusClass = 'status-loading';
+          indicatorClass = 'indicator-loading';
+          statusText = 'Loading...';
+        } else if (inst.blocking) {
+          statusClass = 'status-enabled';
+          indicatorClass = 'indicator-enabled';
+          statusText = 'Enabled';
         } else {
-          timerEndTime = null;
+          statusClass = 'status-disabled';
+          indicatorClass = 'indicator-disabled';
+          statusText = 'Disabled';
+          if (inst.timerEnd && inst.timerEnd > Date.now()) {
+            const remaining = Math.floor((inst.timerEnd - Date.now()) / 1000);
+            timerHtml = '<div class="instance-timer">Re-enables in ' + formatTime(remaining) + '</div>';
+          }
         }
-      }
 
-      enableBtn.disabled = false;
+        return '<div class="instance-card">' +
+          '<div class="instance-info">' +
+            '<div class="instance-name">' + inst.name + '</div>' +
+            '<div class="instance-status ' + statusClass + '">' + statusText + '</div>' +
+            timerHtml +
+          '</div>' +
+          '<div class="status-indicator ' + indicatorClass + '"></div>' +
+        '</div>';
+      }).join('');
+    }
+
+    function updateControls() {
+      // Determine overall state - any blocking = show disable options
+      // All disabled = show enable button prominently
+      const anyBlocking = instancesData.some(i => i.blocking === true);
+      const allDisabled = instancesData.every(i => i.blocking === false);
+      const maxTimer = Math.max(...instancesData.map(i => i.timer || 0));
+
+      if (allDisabled) {
+        enableBtn.style.display = 'block';
+        durationLabel.textContent = 'Add time to all:';
+      } else {
+        enableBtn.style.display = 'none';
+        durationLabel.textContent = 'Disable all for:';
+      }
+    }
+
+    function updateTimers() {
+      let needsRender = false;
+      instancesData.forEach(inst => {
+        if (inst.timerEnd && inst.timerEnd <= Date.now()) {
+          inst.timerEnd = null;
+          needsRender = true;
+        }
+      });
+      if (needsRender) {
+        fetchStatus();
+      } else {
+        renderInstances();
+      }
+    }
+
+    function updateUI(data) {
+      instancesData = data.map(inst => ({
+        ...inst,
+        timerEnd: inst.timer > 0 ? Date.now() + (inst.timer * 1000) : null,
+      }));
+
+      renderInstances();
+      updateControls();
       lastUpdatedEl.textContent = new Date().toLocaleTimeString();
-      updateTimerDisplay();
     }
 
     async function fetchStatus() {
@@ -464,7 +608,7 @@ function getStatusPage() {
         const res = await fetch('/api/status');
         const data = await res.json();
         if (data.success) {
-          updateUI(data);
+          updateUI(data.instances);
         } else {
           showError(data.error || 'Failed to fetch status');
         }
@@ -476,11 +620,13 @@ function getStatusPage() {
     async function enableBlocking() {
       enableBtn.disabled = true;
       enableBtn.textContent = 'Enabling...';
+      durationPicker.querySelectorAll('.duration-btn').forEach(b => b.disabled = true);
+
       try {
         const res = await fetch('/api/enable', { method: 'POST' });
         const data = await res.json();
         if (data.success) {
-          updateUI(data);
+          updateUI(data.instances);
         } else {
           showError(data.error || 'Failed to enable');
           fetchStatus();
@@ -489,24 +635,30 @@ function getStatusPage() {
         showError('Connection error: ' + err.message);
         fetchStatus();
       }
-      enableBtn.textContent = 'Enable Blocking';
+
+      enableBtn.textContent = 'Enable All';
+      enableBtn.disabled = false;
+      durationPicker.querySelectorAll('.duration-btn').forEach(b => b.disabled = false);
     }
 
     async function disableBlocking(minutes, addTime = false) {
-      // Disable all duration buttons while processing
+      enableBtn.disabled = true;
       durationPicker.querySelectorAll('.duration-btn').forEach(b => b.disabled = true);
 
       try {
         let totalMinutes = minutes;
-        if (addTime && currentTimer > 0) {
-          // Add to existing timer
-          totalMinutes = Math.ceil(currentTimer / 60) + minutes;
+        if (addTime) {
+          // Add to the maximum existing timer across all instances
+          const maxTimer = Math.max(...instancesData.map(i => i.timer || 0));
+          if (maxTimer > 0) {
+            totalMinutes = Math.ceil(maxTimer / 60) + minutes;
+          }
         }
 
         const res = await fetch('/api/disable/' + totalMinutes, { method: 'POST' });
         const data = await res.json();
         if (data.success) {
-          updateUI(data);
+          updateUI(data.instances);
         } else {
           showError(data.error || 'Failed to disable');
           fetchStatus();
@@ -516,7 +668,7 @@ function getStatusPage() {
         fetchStatus();
       }
 
-      // Re-enable duration buttons
+      enableBtn.disabled = false;
       durationPicker.querySelectorAll('.duration-btn').forEach(b => b.disabled = false);
     }
 
@@ -527,13 +679,8 @@ function getStatusPage() {
     durationPicker.querySelectorAll('.duration-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         const minutes = parseInt(btn.dataset.minutes);
-        if (currentState) {
-          // Blocking is enabled - disable for this duration
-          disableBlocking(minutes, false);
-        } else {
-          // Blocking is disabled - add time to timer
-          disableBlocking(minutes, true);
-        }
+        const allDisabled = instancesData.every(i => i.blocking === false);
+        disableBlocking(minutes, allDisabled);
       });
     });
 
@@ -543,8 +690,8 @@ function getStatusPage() {
     // Poll every 5 seconds
     setInterval(fetchStatus, 5000);
 
-    // Update timer every second
-    timerInterval = setInterval(updateTimerDisplay, 1000);
+    // Update timer displays every second
+    setInterval(updateTimers, 1000);
   </script>
 </body>
 </html>`;
@@ -564,10 +711,10 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // GET /enable - Enable blocking and redirect to status page
+  // GET /enable - Enable blocking on all instances and redirect
   if (req.method === 'GET' && path === '/enable') {
     try {
-      await setBlocking(true);
+      await setAllBlocking(true);
     } catch (err) {
       console.error('Enable failed:', err.message);
     }
@@ -575,13 +722,13 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // GET /disable/:minutes - Disable blocking and redirect to status page
+  // GET /disable/:minutes - Disable blocking on all instances and redirect
   const disableMatch = path.match(/^\/disable\/(\d+)$/);
   if (req.method === 'GET' && disableMatch) {
     const minutes = parseInt(disableMatch[1], 10);
     const seconds = minutes * 60;
     try {
-      await setBlocking(false, seconds);
+      await setAllBlocking(false, seconds);
     } catch (err) {
       console.error('Disable failed:', err.message);
     }
@@ -589,41 +736,38 @@ async function handleRequest(req, res) {
     return;
   }
 
-  // API endpoints for AJAX calls
+  // API endpoints
 
-  // GET /api/status - Get current status as JSON
+  // GET /api/status - Get status from all instances
   if (req.method === 'GET' && path === '/api/status') {
     try {
-      const data = await getStatus();
-      const isBlocking = data.blocking === 'enabled';
-      jsonResponse(res, 200, { success: true, blocking: isBlocking, timer: data.timer || 0 });
+      const instances = await getAllStatus();
+      jsonResponse(res, 200, { success: true, instances });
     } catch (err) {
       jsonResponse(res, 500, { success: false, error: err.message });
     }
     return;
   }
 
-  // POST /api/enable - Enable blocking
+  // POST /api/enable - Enable blocking on all instances
   if (req.method === 'POST' && path === '/api/enable') {
     try {
-      const result = await setBlocking(true);
-      const isBlocking = result.blocking === 'enabled';
-      jsonResponse(res, 200, { success: true, blocking: isBlocking, timer: 0 });
+      const instances = await setAllBlocking(true);
+      jsonResponse(res, 200, { success: true, instances });
     } catch (err) {
       jsonResponse(res, 500, { success: false, error: err.message });
     }
     return;
   }
 
-  // POST /api/disable/:minutes - Disable blocking
+  // POST /api/disable/:minutes - Disable blocking on all instances
   const apiDisableMatch = path.match(/^\/api\/disable\/(\d+)$/);
   if (req.method === 'POST' && apiDisableMatch) {
     const minutes = parseInt(apiDisableMatch[1], 10);
     const seconds = minutes * 60;
     try {
-      const result = await setBlocking(false, seconds);
-      const isBlocking = result.blocking === 'enabled';
-      jsonResponse(res, 200, { success: true, blocking: isBlocking, timer: result.timer || seconds });
+      const instances = await setAllBlocking(false, seconds);
+      jsonResponse(res, 200, { success: true, instances });
     } catch (err) {
       jsonResponse(res, 500, { success: false, error: err.message });
     }
@@ -638,5 +782,6 @@ async function handleRequest(req, res) {
 const server = http.createServer(handleRequest);
 server.listen(PORT, () => {
   console.log(`pihole-toggle running on port ${PORT}`);
-  console.log(`Pi-hole URL: ${PIHOLE_URL}`);
+  console.log(`Managing ${INSTANCES.length} Pi-hole instance(s):`);
+  INSTANCES.forEach(inst => console.log(`  - ${inst.name}: ${inst.url}`));
 });
