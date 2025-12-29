@@ -664,15 +664,44 @@
                         }, 5000);
                     }
 
+                    function startPolling() {
+                        if (!pollInterval) {
+                            pollInterval = setInterval(fetchStatus, 5000);
+                        }
+                        if (!timerInterval) {
+                            timerInterval = setInterval(updateTimers, 1000);
+                        }
+                    }
+
+                    function stopPolling() {
+                        if (pollInterval) {
+                            clearInterval(pollInterval);
+                            pollInterval = null;
+                        }
+                        if (timerInterval) {
+                            clearInterval(timerInterval);
+                            timerInterval = null;
+                        }
+                    }
+
+                    function handleVisibilityChange() {
+                        if (document.hidden) {
+                            stopPolling();
+                        } else {
+                            fetchStatus();
+                            startPolling();
+                        }
+                    }
+
                     onMounted(() => {
                         fetchStatus();
-                        pollInterval = setInterval(fetchStatus, 5000);
-                        timerInterval = setInterval(updateTimers, 1000);
+                        startPolling();
+                        document.addEventListener("visibilitychange", handleVisibilityChange);
                     });
 
                     onUnmounted(() => {
-                        if (pollInterval) clearInterval(pollInterval);
-                        if (timerInterval) clearInterval(timerInterval);
+                        stopPolling();
+                        document.removeEventListener("visibilitychange", handleVisibilityChange);
                     });
 
                     return {
