@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Pi-hole Toggle</title>
+        <style>
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+
+            body {
+                font-family:
+                    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                    Oxygen, Ubuntu, sans-serif;
+                background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+            }
+
+            .container {
+                background: rgba(255, 255, 255, 0.05);
+                backdrop-filter: blur(10px);
+                border-radius: 24px;
+                padding: 40px;
+                text-align: center;
+                max-width: 500px;
+                width: 100%;
+                box-shadow: 0 25px 50px rgba(0, 0, 0, 0.3);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+            }
+
+            .logo {
+                margin-bottom: 20px;
+            }
+            .logo svg {
+                width: 48px;
+                height: 48px;
+                color: #4ade80;
+            }
+            h1 {
+                color: #fff;
+                font-size: 24px;
+                font-weight: 600;
+                margin-bottom: 8px;
+            }
+            .subtitle {
+                color: rgba(255, 255, 255, 0.6);
+                font-size: 14px;
+                margin-bottom: 24px;
+            }
+
+            .instances {
+                display: flex;
+                flex-direction: column;
+                gap: 12px;
+                margin-bottom: 24px;
+            }
+
+            .instance-card {
+                background: rgba(0, 0, 0, 0.2);
+                border-radius: 12px;
+                padding: 16px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 12px;
+            }
+            .instance-card.loading {
+                opacity: 0.7;
+            }
+
+            .instance-info {
+                text-align: left;
+                flex: 1;
+                min-width: 0;
+            }
+            .instance-header {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 8px;
+            }
+            .instance-name {
+                color: #fff;
+                font-size: 14px;
+                font-weight: 600;
+            }
+
+            .instance-status {
+                font-size: 11px;
+                font-weight: 500;
+                padding: 2px 8px;
+                border-radius: 4px;
+                background: rgba(0, 0, 0, 0.2);
+            }
+
+            .instance-timer {
+                color: rgba(255, 255, 255, 0.6);
+                font-size: 11px;
+                margin-top: 4px;
+                font-variant-numeric: tabular-nums;
+                display: flex;
+                align-items: center;
+                gap: 4px;
+            }
+            .instance-timer svg {
+                width: 12px;
+                height: 12px;
+            }
+
+            .instance-metrics {
+                display: flex;
+                gap: 12px;
+                flex-wrap: wrap;
+            }
+            .metric {
+                display: flex;
+                align-items: center;
+                gap: 4px;
+                font-size: 11px;
+                color: rgba(255, 255, 255, 0.7);
+            }
+            .metric-icon {
+                display: flex;
+                align-items: center;
+                opacity: 0.8;
+            }
+            .metric-icon svg {
+                width: 14px;
+                height: 14px;
+            }
+            .metric-value {
+                font-weight: 600;
+                color: rgba(255, 255, 255, 0.9);
+                font-variant-numeric: tabular-nums;
+            }
+
+            .status-enabled {
+                color: #4ade80;
+            }
+            .status-disabled {
+                color: #f87171;
+            }
+            .status-error {
+                color: #fbbf24;
+            }
+            .status-loading {
+                color: rgba(255, 255, 255, 0.5);
+            }
+
+            .status-indicator {
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                flex-shrink: 0;
+                display: none;
+            }
+            @media (min-width: 480px) {
+                .status-indicator {
+                    display: block;
+                }
+            }
+            .indicator-enabled {
+                background: #4ade80;
+                box-shadow: 0 0 8px rgba(74, 222, 128, 0.5);
+            }
+            .indicator-disabled {
+                background: #f87171;
+                box-shadow: 0 0 8px rgba(248, 113, 113, 0.5);
+            }
+            .indicator-error {
+                background: #fbbf24;
+                box-shadow: 0 0 8px rgba(251, 191, 36, 0.5);
+            }
+            .indicator-loading {
+                background: rgba(255, 255, 255, 0.3);
+            }
+            .indicator-loading.pulse {
+                animation: pulse 1.5s ease-in-out infinite;
+            }
+
+            @keyframes pulse {
+                0%,
+                100% {
+                    opacity: 0.3;
+                    transform: scale(1);
+                }
+                50% {
+                    opacity: 0.8;
+                    transform: scale(1.1);
+                }
+            }
+
+            .skeleton {
+                color: rgba(255, 255, 255, 0.3);
+            }
+
+            .controls {
+                border-top: 1px solid rgba(255, 255, 255, 0.1);
+                padding-top: 24px;
+            }
+
+            .toggle-btn {
+                width: 100%;
+                padding: 16px 32px;
+                font-size: 16px;
+                font-weight: 600;
+                border: none;
+                border-radius: 12px;
+                cursor: pointer;
+                transition: all 0.2s ease;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                margin-bottom: 16px;
+            }
+            .toggle-btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+            .toggle-btn.enable {
+                background: linear-gradient(135deg, #4ade80 0%, #22c55e 100%);
+                color: #000;
+            }
+            .toggle-btn.enable:hover:not(:disabled) {
+                transform: translateY(-2px);
+                box-shadow: 0 10px 30px rgba(74, 222, 128, 0.3);
+            }
+
+            .duration-label {
+                color: rgba(255, 255, 255, 0.6);
+                font-size: 12px;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+                margin-bottom: 12px;
+            }
+
+            .duration-picker {
+                display: flex;
+                gap: 8px;
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+
+            .duration-btn {
+                padding: 10px 16px;
+                font-size: 14px;
+                font-weight: 500;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                background: rgba(255, 255, 255, 0.05);
+                color: #fff;
+                cursor: pointer;
+                transition: all 0.2s ease;
+            }
+            .duration-btn:hover:not(:disabled) {
+                background: rgba(255, 255, 255, 0.1);
+                border-color: rgba(255, 255, 255, 0.3);
+            }
+            .duration-btn:disabled {
+                opacity: 0.5;
+                cursor: not-allowed;
+            }
+
+            .error-banner {
+                background: rgba(239, 68, 68, 0.2);
+                border: 1px solid rgba(239, 68, 68, 0.3);
+                color: #fca5a5;
+                padding: 12px;
+                border-radius: 8px;
+                margin-top: 16px;
+                font-size: 14px;
+            }
+
+            .last-updated {
+                color: rgba(255, 255, 255, 0.4);
+                font-size: 11px;
+                margin-top: 24px;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="app"></div>
+
+        <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+        <script>
+            const { createApp, ref, computed, onMounted, onUnmounted } = Vue;
+
+            // Server-injected instance names for loading state
+            // This placeholder is replaced by the server at runtime
+            const INSTANCE_NAMES = /*__INSTANCE_NAMES__*/ [];
+
+            // ==========================================================================
+            // Heroicons SVG Components (mini/solid variants)
+            // ==========================================================================
+            const IconShieldCheck = {
+                template: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path fill-rule="evenodd" d="M12.516 2.17a.75.75 0 0 0-1.032 0 11.209 11.209 0 0 1-7.877 3.08.75.75 0 0 0-.722.515A12.74 12.74 0 0 0 2.25 9.75c0 5.942 4.064 10.933 9.563 12.348a.749.749 0 0 0 .374 0c5.499-1.415 9.563-6.406 9.563-12.348 0-1.39-.223-2.73-.635-3.985a.75.75 0 0 0-.722-.516l-.143.001c-2.996 0-5.717-1.17-7.734-3.08Zm3.094 8.016a.75.75 0 1 0-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 0 0-1.06 1.06l2.25 2.25a.75.75 0 0 0 1.14-.094l3.75-5.25Z" clip-rule="evenodd" /></svg>`,
+            };
+
+            const IconChartBar = {
+                template: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M15.5 2A1.5 1.5 0 0 0 14 3.5v13a1.5 1.5 0 0 0 1.5 1.5h1a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 16.5 2h-1ZM9.5 6A1.5 1.5 0 0 0 8 7.5v9A1.5 1.5 0 0 0 9.5 18h1a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 10.5 6h-1ZM3.5 10A1.5 1.5 0 0 0 2 11.5v5A1.5 1.5 0 0 0 3.5 18h1A1.5 1.5 0 0 0 6 16.5v-5A1.5 1.5 0 0 0 4.5 10h-1Z" /></svg>`,
+            };
+
+            const IconNoSymbol = {
+                template: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.965 4.904L15.096 14.035C15.976 12.927 16.5 11.525 16.5 10C16.5 6.41 13.59 3.5 10 3.5C8.475 3.5 7.074 4.024 5.965 4.904ZM14.035 15.096L4.904 5.965C4.024 7.074 3.5 8.475 3.5 10C3.5 13.59 6.41 16.5 10 16.5C11.525 16.5 12.927 15.976 14.035 15.096ZM4.343 4.343C5.79 2.896 7.791 2 10 2C14.418 2 18 5.582 18 10C18 12.209 17.104 14.21 15.657 15.657C14.21 17.104 12.209 18 10 18C5.582 18 2 14.418 2 10C2 7.791 2.896 5.79 4.343 4.343Z" clip-rule="evenodd" /></svg>`,
+            };
+
+            const IconChartPie = {
+                template: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path d="M12 9a1 1 0 0 1-1-1V3c0-.552.45-1.007.997-.93a7.004 7.004 0 0 1 5.933 5.933c.077.547-.378.997-.93.997h-5Z" /><path d="M8.003 4.07C8.55 3.994 9 4.449 9 5v5a1 1 0 0 0 1 1h5c.552 0 1.008.45.93.997A7.001 7.001 0 1 1 8.003 4.07Z" /></svg>`,
+            };
+
+            const IconClock = {
+                template: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clip-rule="evenodd" /></svg>`,
+            };
+
+            // ==========================================================================
+            // StatusIndicator Component
+            // ==========================================================================
+            const StatusIndicator = {
+                props: ["status", "loading"],
+                template: `
+        <div
+          class="status-indicator"
+          :class="indicatorClass"
+        ></div>
+      `,
+                computed: {
+                    indicatorClass() {
+                        if (this.loading) return "indicator-loading pulse";
+                        if (this.status === "error") return "indicator-error";
+                        if (this.status === "enabled")
+                            return "indicator-enabled";
+                        if (this.status === "disabled")
+                            return "indicator-disabled";
+                        return "indicator-loading";
+                    },
+                },
+            };
+
+            // ==========================================================================
+            // InstanceCard Component
+            // ==========================================================================
+            const InstanceCard = {
+                props: ["instance", "loading"],
+                components: {
+                    StatusIndicator,
+                    IconChartBar,
+                    IconNoSymbol,
+                    IconChartPie,
+                    IconClock,
+                },
+                template: `
+        <div class="instance-card" :class="{ loading }">
+          <div class="instance-info">
+            <div class="instance-header">
+              <div class="instance-name">{{ instance.name }}</div>
+              <div class="instance-status" :class="statusClass">{{ statusText }}</div>
+            </div>
+            <div v-if="!instance.error" class="instance-metrics">
+              <div class="metric">
+                <span class="metric-icon"><icon-chart-bar /></span>
+                <span class="metric-value" :class="{ skeleton: loading }">{{ formatNumber(instance.totalQueries) }}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-icon"><icon-no-symbol /></span>
+                <span class="metric-value" :class="{ skeleton: loading }">{{ formatNumber(instance.blockedQueries) }}</span>
+              </div>
+              <div class="metric">
+                <span class="metric-icon"><icon-chart-pie /></span>
+                <span class="metric-value" :class="{ skeleton: loading }">{{ instance.percentBlocked?.toFixed(1) || '--' }}%</span>
+              </div>
+            </div>
+            <div v-if="timerDisplay" class="instance-timer">
+              <icon-clock />
+              <span>Re-enables in {{ timerDisplay }}</span>
+            </div>
+          </div>
+          <status-indicator :status="indicatorStatus" :loading="loading" />
+        </div>
+      `,
+                computed: {
+                    statusClass() {
+                        if (this.loading) return "status-loading";
+                        if (this.instance.error) return "status-error";
+                        return this.instance.blocking
+                            ? "status-enabled"
+                            : "status-disabled";
+                    },
+                    statusText() {
+                        if (this.loading) return "Connecting...";
+                        if (this.instance.error) return "Error";
+                        return this.instance.blocking ? "Enabled" : "Disabled";
+                    },
+                    indicatorStatus() {
+                        if (this.instance.error) return "error";
+                        if (this.instance.blocking === true) return "enabled";
+                        if (this.instance.blocking === false) return "disabled";
+                        return "loading";
+                    },
+                    timerDisplay() {
+                        if (
+                            this.instance.blocking !== false ||
+                            !this.instance.remainingSeconds
+                        )
+                            return null;
+                        return this.formatTime(this.instance.remainingSeconds);
+                    },
+                },
+                methods: {
+                    formatNumber(num) {
+                        if (num == null) return "---";
+                        if (num >= 1000000)
+                            return (num / 1000000).toFixed(1) + "M";
+                        if (num >= 1000) return (num / 1000).toFixed(1) + "K";
+                        return num.toString();
+                    },
+                    formatTime(seconds) {
+                        const hrs = Math.floor(seconds / 3600);
+                        const mins = Math.floor((seconds % 3600) / 60);
+                        const secs = Math.floor(seconds % 60);
+                        if (hrs > 0) {
+                            return (
+                                hrs +
+                                ":" +
+                                mins.toString().padStart(2, "0") +
+                                ":" +
+                                secs.toString().padStart(2, "0")
+                            );
+                        }
+                        return mins + ":" + secs.toString().padStart(2, "0");
+                    },
+                },
+            };
+
+            // ==========================================================================
+            // DurationPicker Component
+            // ==========================================================================
+            const DurationPicker = {
+                props: ["disabled", "allDisabled"],
+                emits: ["select"],
+                template: `
+        <div>
+          <div class="duration-label">{{ allDisabled ? 'Add time to all:' : 'Disable all for:' }}</div>
+          <div class="duration-picker">
+            <button
+              v-for="opt in options"
+              :key="opt.minutes"
+              class="duration-btn"
+              :disabled="disabled"
+              @click="$emit('select', opt.minutes)"
+            >{{ opt.label }}</button>
+          </div>
+        </div>
+      `,
+                data() {
+                    return {
+                        options: [
+                            { minutes: 30, label: "30 min" },
+                            { minutes: 60, label: "1 hr" },
+                            { minutes: 120, label: "2 hrs" },
+                            { minutes: 240, label: "4 hrs" },
+                            { minutes: 480, label: "8 hrs" },
+                            { minutes: 720, label: "12 hrs" },
+                            { minutes: 1440, label: "24 hrs" },
+                        ],
+                    };
+                },
+            };
+
+            // ==========================================================================
+            // App Component
+            // ==========================================================================
+            const App = {
+                components: { InstanceCard, DurationPicker, IconShieldCheck },
+                template: `
+        <div class="container">
+          <div class="logo"><icon-shield-check /></div>
+          <h1>Pi-hole Toggle</h1>
+          <p class="subtitle">Ad blocking control</p>
+
+          <div class="instances">
+            <instance-card
+              v-for="inst in instances"
+              :key="inst.name"
+              :instance="inst"
+              :loading="initialLoading"
+            />
+          </div>
+
+          <div class="controls">
+            <button
+              v-if="showEnableButton"
+              class="toggle-btn enable"
+              :disabled="actionPending"
+              @click="enableAll"
+            >{{ actionPending ? 'Enabling...' : 'Enable All' }}</button>
+
+            <duration-picker
+              :disabled="actionPending"
+              :all-disabled="allDisabled"
+              @select="handleDurationSelect"
+            />
+          </div>
+
+          <div v-if="errorMessage" class="error-banner">{{ errorMessage }}</div>
+
+          <div class="last-updated">Last updated: {{ lastUpdated }}</div>
+        </div>
+      `,
+                setup() {
+                    const instances = ref(
+                        INSTANCE_NAMES.map((name) => ({
+                            name,
+                            blocking: null,
+                            timer: 0,
+                            remainingSeconds: 0,
+                            totalQueries: 0,
+                            blockedQueries: 0,
+                            percentBlocked: 0,
+                            error: null,
+                        })),
+                    );
+
+                    const initialLoading = ref(true);
+                    const actionPending = ref(false);
+                    const errorMessage = ref("");
+                    const lastUpdated = ref("-");
+
+                    let pollInterval = null;
+                    let timerInterval = null;
+
+                    const showEnableButton = computed(() => {
+                        return instances.value.some((i) => i.blocking !== true);
+                    });
+
+                    const allDisabled = computed(() => {
+                        return instances.value.every(
+                            (i) => i.blocking === false,
+                        );
+                    });
+
+                    function updateInstances(data) {
+                        const now = Date.now();
+                        instances.value = data.map((inst) => ({
+                            ...inst,
+                            timerEnd:
+                                inst.timer > 0 ? now + inst.timer * 1000 : null,
+                            remainingSeconds: inst.timer > 0 ? inst.timer : 0,
+                        }));
+                        initialLoading.value = false;
+                        lastUpdated.value = new Date().toLocaleTimeString();
+                    }
+
+                    function updateTimers() {
+                        const now = Date.now();
+                        let needsRefresh = false;
+
+                        instances.value.forEach((inst) => {
+                            if (inst.timerEnd) {
+                                const remaining = Math.max(
+                                    0,
+                                    Math.floor((inst.timerEnd - now) / 1000),
+                                );
+                                inst.remainingSeconds = remaining;
+                                if (remaining === 0) {
+                                    inst.timerEnd = null;
+                                    needsRefresh = true;
+                                }
+                            }
+                        });
+
+                        if (needsRefresh) {
+                            fetchStatus();
+                        }
+                    }
+
+                    async function fetchStatus() {
+                        try {
+                            const res = await fetch("/api/status");
+                            const data = await res.json();
+                            if (data.success) {
+                                data.instances.forEach((inst) => {
+                                    if (inst.error)
+                                        console.error(
+                                            "[" + inst.name + "] Error:",
+                                            inst.error,
+                                        );
+                                });
+                                updateInstances(data.instances);
+                            } else {
+                                showError(
+                                    data.error || "Failed to fetch status",
+                                );
+                            }
+                        } catch (err) {
+                            console.error("Connection error:", err);
+                            showError("Connection error: " + err.message);
+                        }
+                    }
+
+                    async function enableAll() {
+                        actionPending.value = true;
+                        try {
+                            const res = await fetch("/api/enable", {
+                                method: "POST",
+                            });
+                            const data = await res.json();
+                            if (data.success) {
+                                updateInstances(data.instances);
+                            } else {
+                                showError(data.error || "Failed to enable");
+                                await fetchStatus();
+                            }
+                        } catch (err) {
+                            showError("Connection error: " + err.message);
+                            await fetchStatus();
+                        }
+                        actionPending.value = false;
+                    }
+
+                    async function handleDurationSelect(minutes) {
+                        actionPending.value = true;
+                        try {
+                            let totalMinutes = minutes;
+                            if (allDisabled.value) {
+                                const maxTimer = Math.max(
+                                    ...instances.value.map(
+                                        (i) => i.remainingSeconds || 0,
+                                    ),
+                                );
+                                if (maxTimer > 0) {
+                                    totalMinutes =
+                                        Math.ceil(maxTimer / 60) + minutes;
+                                }
+                            }
+
+                            const res = await fetch(
+                                "/api/disable/" + totalMinutes,
+                                { method: "POST" },
+                            );
+                            const data = await res.json();
+                            if (data.success) {
+                                updateInstances(data.instances);
+                            } else {
+                                showError(data.error || "Failed to disable");
+                                await fetchStatus();
+                            }
+                        } catch (err) {
+                            showError("Connection error: " + err.message);
+                            await fetchStatus();
+                        }
+                        actionPending.value = false;
+                    }
+
+                    function showError(msg) {
+                        errorMessage.value = msg;
+                        setTimeout(() => {
+                            errorMessage.value = "";
+                        }, 5000);
+                    }
+
+                    function startPolling() {
+                        if (!pollInterval) {
+                            pollInterval = setInterval(fetchStatus, 5000);
+                        }
+                        if (!timerInterval) {
+                            timerInterval = setInterval(updateTimers, 1000);
+                        }
+                    }
+
+                    function stopPolling() {
+                        if (pollInterval) {
+                            clearInterval(pollInterval);
+                            pollInterval = null;
+                        }
+                        if (timerInterval) {
+                            clearInterval(timerInterval);
+                            timerInterval = null;
+                        }
+                    }
+
+                    function handleVisibilityChange() {
+                        if (document.hidden) {
+                            stopPolling();
+                        } else {
+                            fetchStatus();
+                            startPolling();
+                        }
+                    }
+
+                    onMounted(() => {
+                        fetchStatus();
+                        startPolling();
+                        document.addEventListener("visibilitychange", handleVisibilityChange);
+                    });
+
+                    onUnmounted(() => {
+                        stopPolling();
+                        document.removeEventListener("visibilitychange", handleVisibilityChange);
+                    });
+
+                    return {
+                        instances,
+                        initialLoading,
+                        actionPending,
+                        errorMessage,
+                        lastUpdated,
+                        showEnableButton,
+                        allDisabled,
+                        enableAll,
+                        handleDurationSelect,
+                    };
+                },
+            };
+
+            createApp(App).mount("#app");
+        </script>
+    </body>
+</html>
